@@ -62,6 +62,16 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
     def run(self):
         cfg = copy.deepcopy(self.cfg)
 
+        if cfg.training.debug:
+            cfg.training.num_epochs = 2
+            cfg.training.max_train_steps = 3
+            cfg.training.max_val_steps = 3
+            cfg.training.rollout_every = 1
+            cfg.training.checkpoint_every = 1
+            cfg.training.val_every = 1
+            cfg.training.sample_every = 1
+            cfg.logging.wandb_enabled = False
+
         # resume training
         if cfg.training.resume:
             lastest_ckpt_path = self.get_checkpoint_path()
@@ -112,16 +122,18 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
         assert isinstance(env_runner, BaseLowdimRunner)
 
         # configure logging
-        wandb_run = wandb.init(
-            dir=str(self.output_dir),
-            config=OmegaConf.to_container(cfg, resolve=True),
-            **cfg.logging
-        )
-        wandb.config.update(
-            {
-                "output_dir": self.output_dir,
-            }
-        )
+        if cfg.logging.wandb_enabled:
+            wandb_run = wandb.init(
+                dir=str(self.output_dir),
+                config=OmegaConf.to_container(cfg, resolve=True),
+                **{k: v for k, v in cfg.logging.items() if k != 'wandb_enabled'}
+            )
+        if cfg.logging.wandb_enabled:
+            wandb.config.update(
+                {
+                    "output_dir": self.output_dir,
+                }
+            )
 
         # configure checkpoint
         topk_manager = TopKCheckpointManager(
@@ -138,15 +150,6 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
 
         # save batch for sampling
         train_sampling_batch = None
-
-        if cfg.training.debug:
-            cfg.training.num_epochs = 2
-            cfg.training.max_train_steps = 3
-            cfg.training.max_val_steps = 3
-            cfg.training.rollout_every = 1
-            cfg.training.checkpoint_every = 1
-            cfg.training.val_every = 1
-            cfg.training.sample_every = 1
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
@@ -192,7 +195,8 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
-                            wandb_run.log(step_log, step=self.global_step)
+                            if cfg.logging.wandb_enabled:
+                                wandb_run.log(step_log, step=self.global_step)
                             json_logger.log(step_log)
                             self.global_step += 1
 
@@ -286,7 +290,8 @@ class TrainDiffusionTransformerLowdimWorkspace(BaseWorkspace):
 
                 # end of epoch
                 # log of last step is combined with validation and rollout
-                wandb_run.log(step_log, step=self.global_step)
+                if cfg.logging.wandb_enabled:
+                    wandb_run.log(step_log, step=self.global_step)
                 json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1
