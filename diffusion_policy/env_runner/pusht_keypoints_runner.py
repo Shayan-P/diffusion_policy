@@ -16,6 +16,7 @@ from diffusion_policy.gym_util.video_recording_wrapper import VideoRecordingWrap
 from diffusion_policy.policy.base_lowdim_policy import BaseLowdimPolicy
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.env_runner.base_lowdim_runner import BaseLowdimRunner
+import matplotlib.pyplot as plt
 
 class PushTKeypointsRunner(BaseLowdimRunner):
     def __init__(self,
@@ -81,12 +82,14 @@ class PushTKeypointsRunner(BaseLowdimRunner):
         env_seeds = list()
         env_prefixs = list()
         env_init_fn_dills = list()
+        prefix_name = wv.util.generate_id()
+
         # train
         for i in range(n_train):
             seed = train_start_seed + i
             enable_render = i < n_train_vis
 
-            def init_fn(env, seed=seed, enable_render=enable_render):
+            def init_fn(env, seed=seed, enable_render=enable_render, media_name=f'train_{prefix_name}_{i:04d}'):
                 # setup rendering
                 # video_wrapper
                 assert isinstance(env.env, VideoRecordingWrapper)
@@ -94,7 +97,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 env.env.file_path = None
                 if enable_render:
                     filename = pathlib.Path(output_dir).joinpath(
-                        'media', wv.util.generate_id() + ".mp4")
+                        'media', f"{media_name}.mp4")
                     filename.parent.mkdir(parents=False, exist_ok=True)
                     filename = str(filename)
                     env.env.file_path = filename
@@ -112,7 +115,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             seed = test_start_seed + i
             enable_render = i < n_test_vis
 
-            def init_fn(env, seed=seed, enable_render=enable_render):
+            def init_fn(env, seed=seed, enable_render=enable_render, media_name=f'test_{prefix_name}_{i:04d}'):
                 # setup rendering
                 # video_wrapper
                 assert isinstance(env.env, VideoRecordingWrapper)
@@ -120,7 +123,7 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 env.env.file_path = None
                 if enable_render:
                     filename = pathlib.Path(output_dir).joinpath(
-                        'media', wv.util.generate_id() + ".mp4")
+                        'media', f"{media_name}.mp4")
                     filename.parent.mkdir(parents=False, exist_ok=True)
                     filename = str(filename)
                     env.env.file_path = filename
@@ -196,6 +199,8 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             pbar = tqdm.tqdm(total=self.max_steps, desc=f"Eval PushtKeypointsRunner {chunk_idx+1}/{n_chunks}", 
                 leave=False, mininterval=self.tqdm_interval_sec)
             done = False
+
+            uncertainty_mean_sequence = []
             while not done:
                 Do = obs.shape[-1] // 2
                 # create obs dict
@@ -225,7 +230,9 @@ class PushTKeypointsRunner(BaseLowdimRunner):
                 # handle latency_steps, we discard the first n_latency_steps actions
                 # to simulate latency
                 action = np_action_dict['action'][:,self.n_latency_steps:]
-
+                uncertainty_mean = np_action_dict['uncertainty_action_mean'][:,self.n_latency_steps:].mean(axis=(-1, -2))
+                uncertainty_mean_sequence.append(uncertainty_mean)
+                
                 # step env
                 obs, reward, done, info = env.step(action)
                 done = np.all(done)
@@ -238,6 +245,25 @@ class PushTKeypointsRunner(BaseLowdimRunner):
             # collect data for this round
             all_video_paths[this_global_slice] = env.render()[this_local_slice]
             all_rewards[this_global_slice] = env.call('get_attr', 'reward')[this_local_slice]
+            
+            uncertainty_mean_sequence = np.stack(uncertainty_mean_sequence, axis=1)
+            # dim: B, T
+
+            # Plot and save uncertainty mean sequence
+            for i in range(this_n_active_envs):
+                video_path = all_video_paths[this_global_slice][i]
+                if video_path is not None:
+                    # Create plot
+                    plt.figure(figsize=(10, 6))
+                    plt.plot(uncertainty_mean_sequence[i])
+                    plt.title('Uncertainty Mean Sequence')
+                    plt.xlabel('Sequence Step')
+                    plt.ylabel('Uncertainty Mean')
+                    
+                    # Save plot with same name as video but with .png extension
+                    plot_path = str(pathlib.Path(video_path).with_suffix('.png'))
+                    plt.savefig(plot_path)
+                    plt.close()
         # import pdb; pdb.set_trace()
 
         # log

@@ -1,0 +1,17 @@
+defaults:
+  - /test_diffusion_transformer_lowdim_uncertainty_guidance_pusht_workspace@_here_
+  - _self_
+
+
+name: sweep_test_diffusion_transformer_lowdim_uncertainty_guidance
+
+hydra:
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}_guidance_scale:${policy.uncertainty_guidance_scale}
+  sweeper:
+    params:
+      policy.uncertainty_guidance_scale: 0.0,1.0,2.0,4.0,8.0,16.0
+  # Add this to ensure the base config's hydra.sweep settings are overridden
+  defaults:
+    - override hydra/sweep: custom

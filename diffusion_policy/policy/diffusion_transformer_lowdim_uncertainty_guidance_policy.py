@@ -2,6 +2,7 @@ from typing import Dict, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from einops import rearrange, reduce, repeat
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 
@@ -56,7 +57,7 @@ class DiffusionTransformerLowdimUncertaintyGuidancePolicy(BaseLowdimPolicy):
         self.num_inference_steps = num_inference_steps
     
     # ========= inference  ============
-    def conditional_sample(self, 
+    def conditional_sample_with_uncertainty_guidance(self, 
             condition_data, condition_mask,
             cond=None, generator=None,
             # keyword arguments to scheduler.step
@@ -75,6 +76,8 @@ class DiffusionTransformerLowdimUncertaintyGuidancePolicy(BaseLowdimPolicy):
         scheduler.set_timesteps(self.num_inference_steps)
 
         # TODO: Code modified so that we add uncertainty guidance to the model output
+
+        log_uncertainty_timestep = []
 
         for t in scheduler.timesteps:
             # 1. apply conditioning
@@ -124,6 +127,13 @@ class DiffusionTransformerLowdimUncertaintyGuidancePolicy(BaseLowdimPolicy):
                     # uncertainty_direction = rearrange(V, 'b t d (1) -> b t d')
 
             uncertainty_pointwise, uncertainty_guidance_addition = uncertainty_calculation(model_output)
+            log_uncertainty_timestep.append({
+                'uncertainty_pointwise': uncertainty_pointwise.detach(),
+                'prediction_norm': model_output.norm(dim=[-1, -2]).detach(),
+                'uncertainty_guidance_norm': uncertainty_guidance_addition.norm(dim=[-1, -2]).detach(),
+                't': t
+            })
+
             # TODO: Log uncertainty_pointwise later...
             # now we need to find the gradient of uncertainty and project it onto the uncertainty direction...
             # finally augment the model output with the uncertainty direction
@@ -142,9 +152,10 @@ class DiffusionTransformerLowdimUncertaintyGuidancePolicy(BaseLowdimPolicy):
                 ).prev_sample
         
         # finally make sure conditioning is enforced
-        trajectory[condition_mask] = condition_data[condition_mask]        
+        trajectory[condition_mask] = condition_data[condition_mask]
 
-        return trajectory
+        log_uncertainty_timestep.sort(key=lambda x: x['t'])
+        return trajectory, log_uncertainty_timestep
 
 
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -186,12 +197,42 @@ class DiffusionTransformerLowdimUncertaintyGuidancePolicy(BaseLowdimPolicy):
             cond_mask[:,:To,Da:] = True
 
         # run sampling
-        nsample = self.conditional_sample(
+        nsample, log_uncertainty_timestep = self.conditional_sample_with_uncertainty_guidance(
             cond_data, 
             cond_mask,
             cond=cond,
             **self.kwargs)
+
+        #########################################################
+        all_uncertainty_pointwise = [d['uncertainty_pointwise'] for d in log_uncertainty_timestep]
+        uncertainty_guidance_norm = [d['uncertainty_guidance_norm'] for d in log_uncertainty_timestep]
+        prediction_norm = [d['prediction_norm'] for d in log_uncertainty_timestep]
+        #########################################################
         
+        all_uncertainty_pointwise = torch.stack(all_uncertainty_pointwise, dim=0)
+        uncertainty_guidance_norm = torch.stack(uncertainty_guidance_norm, dim=0)
+        prediction_norm = torch.stack(prediction_norm, dim=0)
+        # check if the shape is correct
+        # T_INFERENCE, B, T, Da
+        assert all_uncertainty_pointwise.shape == (self.num_inference_steps, B, T, Da)
+
+        uncertainty_timestep_mean = reduce(all_uncertainty_pointwise, 'T b t d -> T', 'mean')
+        uncertainty_guidance_norm_mean = reduce(uncertainty_guidance_norm, 'T b -> T', 'mean')
+        prediction_norm_mean = reduce(prediction_norm, 'T b -> T', 'mean')
+        uncertainty_action_mean = reduce(all_uncertainty_pointwise, 'T b t d -> b t d', 'mean')
+
+        #########################################################
+        # TODO: later plot this regularly
+        import matplotlib.pyplot as plt
+        plt.plot(uncertainty_timestep_mean.cpu().numpy())
+        plt.plot(uncertainty_guidance_norm_mean.cpu().numpy())
+        plt.plot(prediction_norm_mean.cpu().numpy())
+        plt.plot(uncertainty_guidance_norm_mean.cpu().numpy() * self.uncertainty_guidance_scale)
+        plt.legend(['uncertainty_timestep_mean', 'uncertainty_guidance_norm_mean', 'prediction_norm_mean', 'uncertainty_guidance_norm_mean * uncertainty_guidance_scale'])
+        plt.savefig('uncertainty_timestep.png')
+        plt.close()
+        #########################################################
+
         # unnormalize prediction
         naction_pred = nsample[...,:Da]
         action_pred = self.normalizer['action'].unnormalize(naction_pred)
@@ -206,7 +247,8 @@ class DiffusionTransformerLowdimUncertaintyGuidancePolicy(BaseLowdimPolicy):
         
         result = {
             'action': action,
-            'action_pred': action_pred
+            'action_pred': action_pred,
+            'uncertainty_action_mean': uncertainty_action_mean
         }
         if not self.obs_as_cond:
             nobs_pred = nsample[...,Da:]
